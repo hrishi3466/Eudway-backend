@@ -1,12 +1,10 @@
 package com.eduway.auth.model;
 
+import com.fasterxml.jackson.annotation.JsonManagedReference;
 import jakarta.persistence.*;
 import lombok.*;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @Data
 @NoArgsConstructor
@@ -33,8 +31,10 @@ public class UserProfile {
     private String linkedin;
     private String github;
 
-    @ElementCollection
-    private List<String> badges = new ArrayList<>();  // Awarded badges
+    @OneToMany(mappedBy = "userProfile", cascade = CascadeType.ALL, orphanRemoval = true)
+    @JsonManagedReference  // Prevents infinite recursion
+    private List<UserBadge> badges;
+
 
     @ElementCollection
     @CollectionTable(name = "learning_paths", joinColumns = @JoinColumn(name = "profile_id"))

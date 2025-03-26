@@ -1,15 +1,21 @@
 package com.eduway.auth.service;
 
+import com.eduway.auth.dto.BadgeDTO;
 import com.eduway.auth.model.User;
+import com.eduway.auth.model.UserBadge;
 import com.eduway.auth.model.UserProfile;
+import com.eduway.auth.repository.UserBadgeRepository;
 import com.eduway.auth.repository.UserProfileRepository;
 import com.eduway.auth.repository.UserRepository;
+import org.hibernate.query.Page;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.awt.print.Pageable;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 public class UserProfileService {
@@ -19,6 +25,9 @@ public class UserProfileService {
 
     @Autowired
     private UserRepository userRepository;
+
+    @Autowired
+    private UserBadgeRepository userBadgeRepository; // Step 3: Inject UserBadgeRepository
 
     public UserProfile getUserProfile(String username) {
         User user = userRepository.findByUsername(username)
@@ -33,7 +42,6 @@ public class UserProfileService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
 
         UserProfile profile = userProfileRepository.findByUser(user).orElse(new UserProfile());
-
         profile.setUser(user);
         profile.setFullName(updatedProfile.getFullName());
         profile.setEmail(updatedProfile.getEmail());
@@ -45,20 +53,13 @@ public class UserProfileService {
         profile.setLinkedin(updatedProfile.getLinkedin());
         profile.setGithub(updatedProfile.getGithub());
 
-        // Preserve existing badges and learning paths
-        if (updatedProfile.getBadges() != null && !updatedProfile.getBadges().isEmpty()) {
-            profile.setBadges(updatedProfile.getBadges());
-        }
+        // Preserve existing learning paths
+        profile.setLearningPaths(Optional.ofNullable(updatedProfile.getLearningPaths()).orElse(new HashMap<>()));
+        profile.setCompletedTopicsByPath(Optional.ofNullable(updatedProfile.getCompletedTopicsByPath()).orElse(new HashMap<>()));
 
-        if (updatedProfile.getLearningPaths() != null && !updatedProfile.getLearningPaths().isEmpty()) {
-            profile.setLearningPaths(updatedProfile.getLearningPaths());
-        }
-
-        if (updatedProfile.getCompletedTopicsByPath() != null && !updatedProfile.getCompletedTopicsByPath().isEmpty()) {
-            profile.setCompletedTopicsByPath(updatedProfile.getCompletedTopicsByPath());
-        }
-
-        return userProfileRepository.save(profile);
+        // Save UserProfile first
+        profile = userProfileRepository.save(profile);
+        return profile;
     }
 
     public void deleteUserProfile(String username) {
@@ -71,13 +72,8 @@ public class UserProfileService {
     public UserProfile saveLearningPath(String username, List<String> learningPathTopics) {
         UserProfile profile = getUserProfile(username);
 
-        // Generate a unique ID for this learning path
         String pathId = UUID.randomUUID().toString();
-
-        // Store the learning path
-        profile.getLearningPaths().put(pathId, learningPathTopics);
-
-        // Initialize an empty list for completed topics in this path
+        profile.getLearningPaths().put(pathId, new ArrayList<>(learningPathTopics));
         profile.getCompletedTopicsByPath().put(pathId, new ArrayList<>());
 
         return userProfileRepository.save(profile);
@@ -87,78 +83,97 @@ public class UserProfileService {
         UserProfile profile = getUserProfile(username);
         Map<String, Object> response = new HashMap<>();
 
-        // Validate learning path exists
-        if (!profile.getLearningPaths().containsKey(learningPathId)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Learning path not found");
+        if (profile.getId() == null) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "User profile ID is missing.");
+        }
+
+        if (profile.getLearningPaths() == null || !profile.getLearningPaths().containsKey(learningPathId)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Learning path not found for user: " + username);
         }
 
         List<String> pathTopics = profile.getLearningPaths().get(learningPathId);
-
-        // Validate topic is in the learning path
-        if (!pathTopics.contains(topic)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Topic not in this learning path");
+        if (pathTopics == null || !pathTopics.contains(topic)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Topic '" + topic + "' not found in learning path.");
         }
 
-        // Get or initialize completed topics for this path
-        List<String> completedTopics = profile.getCompletedTopicsByPath().getOrDefault(learningPathId, new ArrayList<>());
+        profile.getCompletedTopicsByPath().computeIfAbsent(learningPathId, k -> new ArrayList<>());
 
-        // Add the topic to completed if not already completed
+        List<String> completedTopics = profile.getCompletedTopicsByPath().get(learningPathId);
         if (!completedTopics.contains(topic)) {
             completedTopics.add(topic);
-            profile.getCompletedTopicsByPath().put(learningPathId, completedTopics);
         }
 
-        // Check if all topics in the path are completed
-        boolean pathCompleted = completedTopics.containsAll(pathTopics);
-
-        // If path is completed, award badge if not already awarded
+        boolean pathCompleted = new HashSet<>(completedTopics).containsAll(pathTopics);
         if (pathCompleted && !profile.getCompletedLearningPaths().contains(learningPathId)) {
-            // Add the path to completed paths
             profile.getCompletedLearningPaths().add(learningPathId);
 
-            // Award badge
-            String badgeName = "Learning Path Master: " + learningPathId; // This could be improved with a proper path name
-            if (!profile.getBadges().contains(badgeName)) {
-                profile.getBadges().add(badgeName);
+            String badgeName = "Learning Path Master: " + getLearningPathName(learningPathId, profile);
+
+            // 🚀 **Prevent duplicate badge creation**
+            if (!userBadgeRepository.existsByUserProfileAndBadgeName(profile, badgeName)) {
+                UserBadge newBadge = new UserBadge(profile, badgeName);
+                userBadgeRepository.save(newBadge);
                 response.put("newBadge", badgeName);
             }
         }
 
-        userProfileRepository.save(profile);
 
-        // Prepare response
+        // Save UserProfile
+        try {
+            profile = userProfileRepository.save(profile);
+        } catch (Exception e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to save user profile", e);
+        }
+
+        double progress = pathTopics.isEmpty() ? 0.0 : ((double) completedTopics.size() / pathTopics.size()) * 100;
         response.put("success", true);
         response.put("topicCompleted", topic);
-        response.put("progress", (double) completedTopics.size() / pathTopics.size() * 100);
+        response.put("progress", progress);
         response.put("pathCompleted", pathCompleted);
-
         return response;
     }
 
-    public List<String> getUserBadges(String username) {
+
+    public List<BadgeDTO> getUserBadges(String username) {
         UserProfile profile = getUserProfile(username);
-        return profile.getBadges();
+
+        return userBadgeRepository.findByUserProfile(profile)
+                .stream()
+                .map(badge -> {
+                    BadgeDTO dto = new BadgeDTO();
+                    dto.setId(badge.getId());
+                    dto.setBadgeName(badge.getBadgeName());
+                    return dto;
+                })
+                .collect(Collectors.toList());
     }
+
 
     public Map<String, Object> getLearningProgress(String username) {
         UserProfile profile = getUserProfile(username);
         Map<String, Object> progress = new HashMap<>();
 
-        // For each learning path, calculate progress
-        for (Map.Entry<String, List<String>> entry : profile.getLearningPaths().entrySet()) {
-            String pathId = entry.getKey();
-            List<String> pathTopics = entry.getValue();
-            List<String> completedTopics = profile.getCompletedTopicsByPath().getOrDefault(pathId, new ArrayList<>());
+        profile.getLearningPaths().forEach((pathId, pathTopics) -> {
+            List<String> completedTopics = profile.getCompletedTopicsByPath()
+                    .getOrDefault(pathId, Collections.emptyList());
 
-            Map<String, Object> pathProgress = new HashMap<>();
-            pathProgress.put("totalTopics", pathTopics.size());
-            pathProgress.put("completedTopics", completedTopics.size());
-            pathProgress.put("progressPercentage", (double) completedTopics.size() / pathTopics.size() * 100);
-            pathProgress.put("isCompleted", profile.getCompletedLearningPaths().contains(pathId));
+            double progressPercentage = pathTopics.isEmpty() ? 0.0 :
+                    ((double) completedTopics.size() / pathTopics.size()) * 100;
 
-            progress.put(pathId, pathProgress);
-        }
+            progress.put(pathId, Map.of(
+                    "totalTopics", pathTopics.size(),
+                    "completedTopics", completedTopics.size(),
+                    "progressPercentage", progressPercentage,
+                    "isCompleted", profile.getCompletedLearningPaths().contains(pathId)
+            ));
+        });
 
         return progress;
+    }
+
+
+    private String getLearningPathName(String learningPathId, UserProfile profile) {
+        return profile.getLearningPaths().getOrDefault(learningPathId, new ArrayList<>()).isEmpty()
+                ? "Unknown Path" : "Path " + learningPathId;
     }
 }

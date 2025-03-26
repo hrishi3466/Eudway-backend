@@ -1,5 +1,6 @@
 package com.eduway.auth.controller;
 
+import com.eduway.auth.dto.BadgeDTO;
 import com.eduway.auth.dto.CompleteTopicRequest;
 import com.eduway.auth.model.UserProfile;
 import com.eduway.auth.service.UserProfileService;
@@ -12,7 +13,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/profile")
-@CrossOrigin(origins = "http://localhost:5173")
+@CrossOrigin(origins = "http://localhost:5175")
 public class UserProfileController {
 
     @Autowired
@@ -47,8 +48,9 @@ public class UserProfileController {
         return ResponseEntity.ok(userProfileService.markTopicAsCompleted(username, request.getTopic(), request.getLearningPathId()));
     }
 
+
     @GetMapping("/{username}/badges")
-    public ResponseEntity<List<String>> getUserBadges(@PathVariable String username) {
+    public ResponseEntity<List<BadgeDTO>> getUserBadges(@PathVariable String username) {
         return ResponseEntity.ok(userProfileService.getUserBadges(username));
     }
 
